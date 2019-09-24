@@ -40,7 +40,6 @@ use crate::{api_client::{self,
                          cache_key_path},
                     package::{PackageArchive,
                               PackageIdent,
-                              PackageIdentTarget,
                               PackageTarget},
                     ChannelIdent}};
 
@@ -156,17 +155,15 @@ impl<'a> DownloadTask<'a> {
 
     // For each source, use the builder/depot to expand it to a fully qualifed form
     // The same call gives us the TDEPS, add those as
-    fn expand_sources<T>(&self, ui: &mut T) -> Result<HashSet<PackageIdentTarget>>
+    fn expand_sources<T>(&self, ui: &mut T) -> Result<HashSet<(Box<PackageIdent>, PackageTarget)>>
         where T: UIWriter
     {
         let mut expanded_packages = Vec::<Package>::new();
-        let mut expanded_idents = HashSet::<PackageIdentTarget>::new();
+        let mut expanded_idents = HashSet::<(Box<PackageIdent>, PackageTarget)>::new();
 
         // This loop should be easy to convert to a parallel map
         for ident in &self.idents {
-            let latest = self.determine_latest_from_ident(ui,
-                                                      &PackageIdentTarget { ident:  ident.clone(),
-                                                                            target: self.target, });
+            let latest = self.determine_latest_from_ident(ui, &ident.clone(), self.target);
             if let Ok(package) = latest {
                 expanded_packages.push(package);
             }
@@ -175,12 +172,10 @@ impl<'a> DownloadTask<'a> {
         // Collect all the expanded deps into one structure
         // Done separately because it's not as easy to parallelize
         for package in expanded_packages {
-            expanded_idents.insert(PackageIdentTarget { ident:  package.ident,
-                                                        target: self.target, });
             for ident in package.tdeps {
-                expanded_idents.insert(PackageIdentTarget { ident,
-                                                            target: self.target });
+                expanded_idents.insert((Box::new(ident.clone()), self.target));
             }
+            expanded_idents.insert((Box::new(package.ident.clone()), self.target));
         }
 
         ui.status(Status::Found,
@@ -191,7 +186,7 @@ impl<'a> DownloadTask<'a> {
 
     fn download_artifacts<T>(&self,
                              ui: &mut T,
-                             expanded_idents: &HashSet<PackageIdentTarget>)
+                             expanded_idents: &HashSet<(Box<PackageIdent>, PackageTarget)>)
                              -> Result<Vec<PackageArchive>>
         where T: UIWriter
     {
@@ -200,10 +195,10 @@ impl<'a> DownloadTask<'a> {
         ui.status(Status::Downloading,
                   format!("Downloading {} artifacts", expanded_idents.len()))?;
 
-        for ident in expanded_idents {
+        for (ident, target) in expanded_idents {
             // TODO think through error handling here; failure to fetch, etc
             // Probably worth keeping statistics
-            let archive: PackageArchive = self.get_cached_archive(ui, &ident)?;
+            let archive: PackageArchive = self.get_cached_archive(ui, ident, *target)?;
 
             downloaded_artifacts.push(archive);
         }
@@ -213,7 +208,8 @@ impl<'a> DownloadTask<'a> {
 
     fn determine_latest_from_ident<T>(&self,
                                       ui: &mut T,
-                                      ident: &PackageIdentTarget)
+                                      ident: &PackageIdent,
+                                      target: PackageTarget)
                                       -> Result<Package>
         where T: UIWriter
     {
@@ -222,12 +218,13 @@ impl<'a> DownloadTask<'a> {
         // to a local package would defeat that. Find the latest
         // package in the proper channel from Builder API,
         ui.status(Status::Determining,
-                  format!("latest version of {} in the '{}' channel",
-                          &ident, self.channel))?;
-        match self.fetch_latest_package_in_channel_for(ident, self.channel, self.token) {
+                  format!("latest version of {} for {} in the '{}' channel",
+                          ident, target, self.channel))?;
+        match self.fetch_latest_package_in_channel_for(ident, target, self.channel, self.token) {
             Ok(latest_package) => {
                 ui.status(Status::Using,
-                          format!("{} as latest matching {}", latest_package.ident, ident))?;
+                          format!("{} as latest matching {} for {}",
+                                  latest_package.ident, ident, target))?;
                 Ok(latest_package)
             }
             Err(Error::APIClient(APIError(StatusCode::NOT_FOUND, _))) => {
@@ -235,14 +232,14 @@ impl<'a> DownloadTask<'a> {
                 // heavyweight process, and probably a bad idea in the context of
                 // what's a normally a batch process. It might be ok to fall back to
                 // the stable channel, but for now, error.
-                ui.warn(format!("No packages matching ident {} for exist in the '{}' channel",
-                                ident, self.channel))?;
-                Err(Error::PackageNotFound(
-                    format!("{} in channel {}", ident, self.channel).to_string(),
-                ))
+                ui.warn(format!("No packages matching ident {} for {} exist in the '{}' channel",
+                                ident, target, self.channel))?;
+                Err(Error::PackageNotFound(format!("{} for {} in channel {}",
+                                                   ident, target, self.channel).to_string()))
             }
             Err(e) => {
-                debug!("error fetching ident {}: {:?}", ident, e);
+                debug!("error fetching ident {} for target {}: {:?}",
+                       ident, target, e);
                 Err(e)
             }
         }
@@ -254,42 +251,46 @@ impl<'a> DownloadTask<'a> {
     /// verifies it, and returns a handle to the package's metadata.
     fn get_cached_archive<T>(&self,
                              ui: &mut T,
-                             package: &PackageIdentTarget)
+                             ident: &PackageIdent,
+                             target: PackageTarget)
                              -> Result<PackageArchive>
         where T: UIWriter
     {
-        let fetch_artifact = || self.fetch_artifact(ui, package);
-        if self.is_artifact_cached(package) {
+        let fetch_artifact = || self.fetch_artifact(ui, ident, target);
+        if self.is_artifact_cached(ident, target) {
             debug!("Found {} in artifact cache, skipping remote download",
-                   package.ident);
+                   ident);
             ui.status(Status::Skipping,
-                      format!("because {} was found in downloads directory", package.ident))?;
+                      format!("because {} was found in downloads directory", ident))?;
         } else if let Err(err) = retry(delay::Fixed::from(RETRY_WAIT).take(RETRIES), fetch_artifact)
         {
             return Err(Error::DownloadFailed(format!("We tried {} times but \
-                                                      could not download {}. \
-                                                      Last error was: {}",
-                                                     RETRIES, package, err)));
+                                                      could not download {} for \
+                                                      {}. Last error was: {}",
+                                                     RETRIES, ident, target, err)));
         }
 
         // At this point the artifact is in the cache...
-        let mut artifact = PackageArchive::new(self.cached_artifact_path(package));
-        self.verify_artifact(ui, package, &mut artifact)?;
+        let mut artifact = PackageArchive::new(self.cached_artifact_path(ident, target));
+        self.verify_artifact(ui, ident, target, &mut artifact)?;
         Ok(artifact)
     }
 
     // This function and it's sibling in install.rs deserve to be refactored to eke out commonality.
     /// Retrieve the identified package from the depot, ensuring that
     /// the artifact is cached locally.
-    fn fetch_artifact<T>(&self, ui: &mut T, package: &PackageIdentTarget) -> Result<()>
+    fn fetch_artifact<T>(&self,
+                         ui: &mut T,
+                         ident: &PackageIdent,
+                         target: PackageTarget)
+                         -> Result<()>
         where T: UIWriter
     {
-        ui.status(Status::Downloading, package)?;
-        match self.api_client
-                  .fetch_package((&package.ident, package.target),
-                                 self.token,
-                                 self.artifact_download_path,
-                                 ui.progress())
+        ui.status(Status::Downloading, format!("{} for {}", ident, target))?;
+        match self.api_client.fetch_package((ident, target),
+                                            self.token,
+                                            self.artifact_download_path,
+                                            ui.progress())
         {
             Ok(_) => Ok(()),
             Err(api_client::Error::APIError(StatusCode::NOT_IMPLEMENTED, _)) => {
@@ -323,30 +324,34 @@ impl<'a> DownloadTask<'a> {
 
     fn verify_artifact<T>(&self,
                           ui: &mut T,
-                          package: &PackageIdentTarget,
+                          ident: &PackageIdent,
+                          target: PackageTarget,
                           artifact: &mut PackageArchive)
                           -> Result<()>
         where T: UIWriter
     {
         let artifact_ident = artifact.ident()?;
-        if package.ident.as_ref() != &artifact_ident {
+        if ident != &artifact_ident {
             return Err(Error::ArtifactIdentMismatch((artifact.file_name(),
                                                      artifact_ident.to_string(),
-                                                     package.to_string())));
+                                                     ident.to_string())));
         }
 
         // Is this even possible? We specify the target in fetch_package above, so we should never
         // be given a
         let artifact_target = artifact.target()?;
-        if package.target != artifact_target {
+        if target != artifact_target {
             debug!("Got wrong package target, expected {}, got {}",
-                   artifact_target, package.target);
+                   artifact_target, target);
             return Err(Error::HabitatCore(hcore::Error::WrongActivePackageTarget(
-                package.target,
+                target,
                 artifact_target,
             )));
         }
 
+        // We need to look at the artifact to know the signing keys to fetch
+        // Once we have them, it's the natural time to verify.
+        // Otherwise, it might make sense to take this fetch out of the verification code.
         let nwr = artifact::artifact_signer(&artifact.path)?;
         if SigKeyPair::get_public_key_path(&nwr, self.key_download_path).is_err() {
             ui.status(Status::Downloading,
@@ -357,33 +362,33 @@ impl<'a> DownloadTask<'a> {
         if self.verify {
             ui.status(Status::Verifying, artifact.ident()?)?;
             artifact.verify(&self.key_download_path)?;
-            debug!("Verified {} signed by {}", package, &nwr);
+            debug!("Verified {} for {} signed by {}", ident, target, &nwr);
         }
         Ok(())
     }
 
     // This function and it's sibling in install.rs deserve to be refactored to eke out commonality.
-    fn is_artifact_cached(&self, package: &PackageIdentTarget) -> bool {
-        self.cached_artifact_path(package).is_file()
+    fn is_artifact_cached(&self, ident: &PackageIdent, target: PackageTarget) -> bool {
+        self.cached_artifact_path(ident, target).is_file()
     }
 
     // This function and it's sibling in install.rs deserve to be refactored to eke out commonality.
     /// Returns the path to the location this package would exist at in
     /// the local package cache. It does not mean that the package is
     /// actually *in* the package cache, though.
-    fn cached_artifact_path(&self, package: &PackageIdentTarget) -> PathBuf {
+    fn cached_artifact_path(&self, ident: &PackageIdent, target: PackageTarget) -> PathBuf {
         self.artifact_download_path
-            .join(package.archive_name().unwrap())
+            .join(ident.archive_name_with_target(target).unwrap())
     }
 
     fn fetch_latest_package_in_channel_for(&self,
-                                           ident: &PackageIdentTarget,
+                                           ident: &PackageIdent,
+                                           target: PackageTarget,
                                            channel: &ChannelIdent,
                                            token: Option<&str>)
                                            -> Result<Package> {
-        let origin_package =
-            self.api_client
-                .show_package_metadata((&ident.ident, ident.target), channel, token)?;
+        let origin_package = self.api_client
+                                 .show_package_metadata((&ident, target), channel, token)?;
         Ok(origin_package)
     }
 }
