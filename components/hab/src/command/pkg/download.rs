@@ -9,7 +9,7 @@
 //! Will download `core/redis` package and all it's transitive dependiencies from a custom depot:
 //!
 //! ```bash
-//! $ hab pkg download -u http://depot.co:9633 -t x86-64_linux --download_directory download core/redis/3.0.1
+//! $ hab pkg download -u http://depot.co:9633 -t x86-64_linux --download-directory download core/redis/3.0.1
 //! ```
 //!
 //! This would download the `3.0.1` version of redis for linux and all
@@ -114,6 +114,7 @@ pub fn start<U>(ui: &mut U,
                               api_client,
                               token,
                               channel,
+                              download_path,
                               artifact_download_path,
                               key_download_path,
                               verify };
@@ -133,6 +134,7 @@ struct DownloadTask<'a> {
     token: Option<&'a str>,
     channel: &'a ChannelIdent,
     /// The path to the local artifact cache (e.g., /hab/cache/artifacts)
+    download_path: &'a Path,
     artifact_download_path: &'a Path,
     key_download_path: &'a Path,
     verify: bool,
@@ -148,7 +150,7 @@ impl<'a> DownloadTask<'a> {
         ui.begin(format!("Preparing to download necessary packages for {} idents",
                          self.idents.len()))?;
         ui.begin(format!("Using channel {} from {}", self.channel, self.url))?;
-        ui.begin(format!("Storing in cache at {:?} ", self.artifact_download_path))?;
+        ui.begin(format!("Storing in cache at {:?} ", self.download_path))?;
 
         // Phase 1: Expand to fully qualified deps and TDEPS
         let expanded_idents = self.expand_sources(ui)?;
