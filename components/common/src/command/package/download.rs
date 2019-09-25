@@ -112,9 +112,9 @@ pub fn start<U>(ui: &mut U,
                               key_download_path,
                               verify };
 
-    let downloaded_artifacts: Vec<PackageArchive> = task.execute(ui).unwrap();
+    let download_count = task.execute(ui).unwrap();
 
-    debug!("Expanded package count: {}", downloaded_artifacts.len());
+    debug!("Expanded package count: {}", download_count);
 
     Ok(())
 }
@@ -133,7 +133,7 @@ struct DownloadTask<'a> {
 }
 
 impl<'a> DownloadTask<'a> {
-    fn execute<T>(&self, ui: &mut T) -> Result<Vec<PackageArchive>>
+    fn execute<T>(&self, ui: &mut T) -> Result<usize>
         where T: UIWriter
     {
         // This was written intentionally with an eye towards data parallelism
@@ -150,7 +150,7 @@ impl<'a> DownloadTask<'a> {
         // Phase 2: Download artifacts
         let downloaded_artifacts = self.download_artifacts(ui, &expanded_idents)?;
 
-        Ok(downloaded_artifacts)
+        Ok(downloaded_artifacts.len())
     }
 
     // For each source, use the builder/depot to expand it to a fully qualifed form
