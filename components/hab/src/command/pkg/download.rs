@@ -73,8 +73,6 @@ pub const RETRY_WAIT: Duration = Duration::from_millis(3000);
 /// At the end of this function, the specified package and all its dependencies will be downloaded
 /// on the system.
 
-/// Note: it's worth investigating whether
-/// LocalPackageUsage makes sense here
 /// Also, in the future we may want to accept an alternate builder to 'filter' what we pull down by
 /// That would greatly optimize the 'sync' to on prem builder case, as we could point to that
 /// and only fetch what we don't already have.
@@ -133,7 +131,7 @@ struct DownloadTask<'a> {
     api_client: BoxedClient,
     token: Option<&'a str>,
     channel: &'a ChannelIdent,
-    /// The path to the local artifact cache (e.g., /hab/cache/artifacts)
+    /// The path to the local artifact directory (e.g., /hab/cache/artifacts)
     download_path: &'a Path,
     artifact_download_path: &'a Path,
     key_download_path: &'a Path,
@@ -150,7 +148,7 @@ impl<'a> DownloadTask<'a> {
         ui.begin(format!("Preparing to download necessary packages for {} idents",
                          self.idents.len()))?;
         ui.begin(format!("Using channel {} from {}", self.channel, self.url))?;
-        ui.begin(format!("Storing in cache at {:?} ", self.download_path))?;
+        ui.begin(format!("Storing in download directory at {:?} ", self.download_path))?;
 
         // Phase 1: Expand to fully qualified deps and TDEPS
         let expanded_idents = self.expand_sources(ui)?;
