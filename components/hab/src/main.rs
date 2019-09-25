@@ -552,16 +552,16 @@ fn sub_pkg_download(ui: &mut UI, m: &ArgMatches<'_>, _feature_flags: FeatureFlag
 
     init();
 
-    common::command::package::download::start(ui,
-                                              &url,
-                                              &channel,
-                                              PRODUCT,
-                                              VERSION,
-                                              install_sources_from_file,
-                                              target,
-                                              download_dir.as_ref(),
-                                              token.as_ref().map(String::as_str),
-                                              verify)?;
+    command::pkg::download::start(ui,
+                                  &url,
+                                  &channel,
+                                  PRODUCT,
+                                  VERSION,
+                                  install_sources_from_file,
+                                  target,
+                                  download_dir.as_ref(),
+                                  token.as_ref().map(String::as_str),
+                                  verify)?;
     Ok(())
 }
 

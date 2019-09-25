@@ -6,13 +6,17 @@
 //! $ hab pkg download core/redis
 //! ```
 //!
-//! Will download `core/redis` package from a custom depot:
+//! Will download `core/redis` package and all it's transitive dependiencies from a custom depot:
 //!
 //! ```bash
-//! $ hab pkg download core/redis/3.0.1 redis -u http://depot.co:9633
+//! $ hab pkg download -u http://depot.co:9633 -t x86-64_linux --download_directory download core/redis/3.0.1
 //! ```
 //!
-//! This would download the `3.0.1` version of redis.
+//! This would download the `3.0.1` version of redis for linux and all
+//! of it's transitive dependencies to a directory 'download'
+//!
+//! The most common useage will have a file containing newline separated list of package
+//! identifiers.
 //!
 //! # Internals
 //!
@@ -32,6 +36,7 @@ use crate::{api_client::{self,
                          Client,
                          Error::APIError,
                          Package},
+            common::Error as CommonError,
             hcore::{self,
                     crypto::{artifact,
                              keys::parse_name_with_rev,
@@ -47,10 +52,11 @@ use reqwest::StatusCode;
 use retry::{delay,
             retry};
 
-use crate::{error::{Error,
-                    Result},
-            ui::{Status,
-                 UIWriter}};
+use crate::error::{Error,
+                   Result};
+
+use habitat_common::ui::{Status,
+                         UIWriter};
 
 pub const RETRIES: usize = 5;
 pub const RETRY_WAIT: Duration = Duration::from_millis(3000);
@@ -234,8 +240,9 @@ impl<'a> DownloadTask<'a> {
                 // the stable channel, but for now, error.
                 ui.warn(format!("No packages matching ident {} for {} exist in the '{}' channel",
                                 ident, target, self.channel))?;
-                Err(Error::PackageNotFound(format!("{} for {} in channel {}",
-                                                   ident, target, self.channel).to_string()))
+                Err(Error::from(CommonError::PackageNotFound(
+                    format!("{} for {} in channel {}", ident, target, self.channel).to_string(),
+                )))
             }
             Err(e) => {
                 debug!("error fetching ident {} for target {}: {:?}",
@@ -264,10 +271,10 @@ impl<'a> DownloadTask<'a> {
                       format!("because {} was found in downloads directory", ident))?;
         } else if let Err(err) = retry(delay::Fixed::from(RETRY_WAIT).take(RETRIES), fetch_artifact)
         {
-            return Err(Error::DownloadFailed(format!("We tried {} times but \
-                                                      could not download {} for \
-                                                      {}. Last error was: {}",
-                                                     RETRIES, ident, target, err)));
+            return Err(Error::from(CommonError::DownloadFailed(format!(
+                "We tried {} times but could not download {} for {}. Last error was: {}",
+                RETRIES, ident, target, err
+            ))));
         }
 
         // At this point the artifact is in the cache...
@@ -332,9 +339,11 @@ impl<'a> DownloadTask<'a> {
     {
         let artifact_ident = artifact.ident()?;
         if ident != &artifact_ident {
-            return Err(Error::ArtifactIdentMismatch((artifact.file_name(),
-                                                     artifact_ident.to_string(),
-                                                     ident.to_string())));
+            return Err(Error::from(CommonError::ArtifactIdentMismatch((
+                artifact.file_name(),
+                artifact_ident.to_string(),
+                ident.to_string(),
+            ))));
         }
 
         // Is this even possible? We specify the target in fetch_package above, so we should never
