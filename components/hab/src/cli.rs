@@ -922,7 +922,7 @@ fn sub_pkg_download() -> App<'static, 'static> {
     (@arg PKG_IDENT: +multiple
             "One or more Habitat package identifiers (ex: acme/redis)")
     (@arg PKG_TARGET: --target -t +takes_value {valid_target}
-            "Target architecture to fetch. Allowable options are one of (TODO ADD THIS)")
+            "Target architecture to fetch. E.g. x86_64-linux")
     (@arg VERIFY: --verify
             "Verify package integrity after download (Warning: this can be slow)")
     );
@@ -1413,9 +1413,13 @@ fn valid_target(val: String) -> result::Result<(), String> {
     match PackageTarget::from_str(&val) {
         Ok(_) => Ok(()),
         Err(_) => {
-            Err(format!("'{}' is not valid. A valid target is in the form \
-                         architecture-platform (example: x86_64-linux)",
-                        &val))
+            let targets: Vec<_> = PackageTarget::targets().map(std::convert::AsRef::as_ref)
+                                                          .collect();
+            Err(format!("'{}' is not valid. Valid targets are in the form \
+                         architecture-platform (currently habitat \
+                         supports: {})",
+                        &val,
+                        targets.join(", ")))
         }
     }
 }
