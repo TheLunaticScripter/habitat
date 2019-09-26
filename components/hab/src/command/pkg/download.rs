@@ -6,16 +6,17 @@
 //! $ hab pkg download core/redis
 //! ```
 //!
-//! Will download `core/redis` package and all it's transitive dependiencies from a custom depot:
+//! Will download `core/redis` package and all it's transitive dependencies from a custom depot:
 //!
 //! ```bash
 //! $ hab pkg download -u http://depot.co:9633 -t x86-64_linux --download-directory download core/redis/3.0.1
 //! ```
 //!
 //! This would download the `3.0.1` version of redis for linux and all
-//! of it's transitive dependencies to a directory 'download'
+//! of its transitive dependencies, and the accompanying signing keys
+//! to a directory 'download'
 //!
-//! The most common useage will have a file containing newline separated list of package
+//! The most common usage will have a file containing newline separated list of package
 //! identifiers.
 //!
 //! # Internals
@@ -37,8 +38,7 @@ use crate::{api_client::{self,
                          Error::APIError,
                          Package},
             common::Error as CommonError,
-            hcore::{self,
-                    crypto::{artifact,
+            hcore::{crypto::{artifact,
                              keys::parse_name_with_rev,
                              SigKeyPair},
                     fs::cache_root_path,
@@ -62,15 +62,17 @@ pub const RETRY_WAIT: Duration = Duration::from_millis(3000);
 
 /// Download a Habitat package.
 ///
-/// If an `PackageIdentTarget` is given, we retrieve the package from the specified Builder
+/// If an `PackageIdent` is given, we retrieve the package from the specified Builder
 /// `url`. Providing a fully-qualified identifer will result in that exact package being installed
 /// (regardless of `channel`). Providing a partially-qualified identifier will result in the
 /// installation of latest appropriate release from the given `channel`.
 ///
-/// Any dependencies of will be retrieved from Builder (if they're not already cached locally).
+/// Any dependencies of will be retrieved from Builder (if they're not already downloaded locally).
 ///
-/// At the end of this function, the specified package and all its dependencies will be downloaded
-/// on the system.
+/// At the end of this function, the specified package and all its
+/// dependencies will be downloaded on the system in the
+/// <download_path>/archive directory. Any signing keys will also be
+/// downloaded and put in the <download_path/keys> directory.
 
 /// Also, in the future we may want to accept an alternate builder to 'filter' what we pull down by
 /// That would greatly optimize the 'sync' to on prem builder case, as we could point to that
@@ -98,7 +100,7 @@ pub fn start<U>(ui: &mut U,
     debug!("Using download_path {:?} expanded to {:?}",
            download_path, download_path_expanded);
 
-    // We deliberately use None to specifiy the default path as this is used for cert paths, which
+    // We deliberately use None to specify the default path as this is used for cert paths, which
     // we don't want to override.
     let api_client = Client::new(url, product, version, None)?;
     let task = DownloadTask { idents,
@@ -193,9 +195,16 @@ impl<'a> DownloadTask<'a> {
                   format!("Downloading {} artifacts", expanded_idents.len()))?;
 
         for (ident, target) in expanded_idents {
-            // TODO think through error handling here; failure to fetch, etc
-            // Probably worth keeping statistics
-            let archive: PackageArchive = self.get_cached_archive(ui, ident, *target)?;
+            let archive: PackageArchive = match self.get_downloaded_archive(ui, ident, *target) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Is this the right status? Or should this be a debug message?
+                    ui.status(Status::Missing,
+                              format!("Error fetching archive {} for {}: {:?}",
+                                      ident, *target, e))?;
+                    return Err(e);
+                }
+            };
 
             downloaded_artifacts.push(archive);
         }
@@ -227,7 +236,7 @@ impl<'a> DownloadTask<'a> {
             Err(Error::APIClient(APIError(StatusCode::NOT_FOUND, _))) => {
                 // In install we attempt to recommend a channel to look in. That's a bit of a
                 // heavyweight process, and probably a bad idea in the context of
-                // what's a normally a batch process. It might be ok to fall back to
+                // what's a normally a batch process. It might be OK to fall back to
                 // the stable channel, but for now, error.
                 ui.warn(format!("No packages matching ident {} for {} exist in the '{}' channel",
                                 ident, target, self.channel))?;
@@ -247,19 +256,19 @@ impl<'a> DownloadTask<'a> {
     // install.rs deserve to be refactored to eke out commonality.
     /// This ensures the identified package is in the local cache,
     /// verifies it, and returns a handle to the package's metadata.
-    fn get_cached_archive<T>(&self,
-                             ui: &mut T,
-                             ident: &PackageIdent,
-                             target: PackageTarget)
-                             -> Result<PackageArchive>
+    fn get_downloaded_archive<T>(&self,
+                                 ui: &mut T,
+                                 ident: &PackageIdent,
+                                 target: PackageTarget)
+                                 -> Result<PackageArchive>
         where T: UIWriter
     {
         let fetch_artifact = || self.fetch_artifact(ui, ident, target);
-        if self.is_artifact_cached(ident, target) {
-            debug!("Found {} in artifact cache, skipping remote download",
+        if self.is_artifact_downloaded(ident, target) {
+            debug!("Found {} in download directory, skipping remote download",
                    ident);
             ui.status(Status::Skipping,
-                      format!("because {} was found in downloads directory", ident))?;
+                      format!("because {} was found in the download directory", ident))?;
         } else if let Err(err) = retry(delay::Fixed::from(RETRY_WAIT).take(RETRIES), fetch_artifact)
         {
             return Err(Error::from(CommonError::DownloadFailed(format!(
@@ -268,15 +277,15 @@ impl<'a> DownloadTask<'a> {
             ))));
         }
 
-        // At this point the artifact is in the cache...
-        let mut artifact = PackageArchive::new(self.cached_artifact_path(ident, target));
+        // At this point the artifact is in the download directory...
+        let mut artifact = PackageArchive::new(self.downloaded_artifact_path(ident, target));
         self.verify_artifact(ui, ident, target, &mut artifact)?;
         Ok(artifact)
     }
 
     // This function and it's sibling in install.rs deserve to be refactored to eke out commonality.
     /// Retrieve the identified package from the depot, ensuring that
-    /// the artifact is cached locally.
+    /// the artifact is downloaded.
     fn fetch_artifact<T>(&self,
                          ui: &mut T,
                          ident: &PackageIdent,
@@ -328,27 +337,6 @@ impl<'a> DownloadTask<'a> {
                           -> Result<()>
         where T: UIWriter
     {
-        let artifact_ident = artifact.ident()?;
-        if ident != &artifact_ident {
-            return Err(Error::from(CommonError::ArtifactIdentMismatch((
-                artifact.file_name(),
-                artifact_ident.to_string(),
-                ident.to_string(),
-            ))));
-        }
-
-        // Is this even possible? We specify the target in fetch_package above, so we should never
-        // be given a
-        let artifact_target = artifact.target()?;
-        if target != artifact_target {
-            debug!("Got wrong package target, expected {}, got {}",
-                   artifact_target, target);
-            return Err(Error::HabitatCore(hcore::Error::WrongActivePackageTarget(
-                target,
-                artifact_target,
-            )));
-        }
-
         // We need to look at the artifact to know the signing keys to fetch
         // Once we have them, it's the natural time to verify.
         // Otherwise, it might make sense to take this fetch out of the verification code.
@@ -368,15 +356,15 @@ impl<'a> DownloadTask<'a> {
     }
 
     // This function and it's sibling in install.rs deserve to be refactored to eke out commonality.
-    fn is_artifact_cached(&self, ident: &PackageIdent, target: PackageTarget) -> bool {
-        self.cached_artifact_path(ident, target).is_file()
+    fn is_artifact_downloaded(&self, ident: &PackageIdent, target: PackageTarget) -> bool {
+        self.downloaded_artifact_path(ident, target).is_file()
     }
 
     // This function and it's sibling in install.rs deserve to be refactored to eke out commonality.
     /// Returns the path to the location this package would exist at in
     /// the local package cache. It does not mean that the package is
     /// actually *in* the package cache, though.
-    fn cached_artifact_path(&self, ident: &PackageIdent, target: PackageTarget) -> PathBuf {
+    fn downloaded_artifact_path(&self, ident: &PackageIdent, target: PackageTarget) -> PathBuf {
         self.path_for_artifact()
             .join(ident.archive_name_with_target(target).unwrap())
     }
