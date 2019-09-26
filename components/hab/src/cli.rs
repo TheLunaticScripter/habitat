@@ -916,7 +916,7 @@ fn sub_pkg_download() -> App<'static, 'static> {
          https://bldr.habitat.sh)")
     (@arg CHANNEL: --channel -c +takes_value default_value[stable] env(ChannelIdent::ENVVAR)
         "Download from the specified release channel (default: stable)")
-    (@arg DOWNLOAD_DIRECTORY: --download-directory +takes_value "The path to store downloaded artifacts")
+    (@arg DOWNLOAD_DIRECTORY: --("download-directory") +takes_value "The path to store downloaded artifacts")
     (@arg PKG_IDENT_FILE: --file +takes_value +multiple
         "File with newline separated package identifiers")
     (@arg PKG_IDENT: +multiple

@@ -139,7 +139,7 @@ impl<'a> DownloadTask<'a> {
         ui.begin(format!("Preparing to download necessary packages for {} idents",
                          self.idents.len()))?;
         ui.begin(format!("Using channel {} from {}", self.channel, self.url))?;
-        ui.begin(format!("Storing in download directory at {:?} ", self.download_path))?;
+        ui.begin(format!("Storing in download directory {:?} ", self.download_path))?;
 
         // Phase 1: Expand to fully qualified deps and TDEPS
         let expanded_idents = self.expand_sources(ui)?;
