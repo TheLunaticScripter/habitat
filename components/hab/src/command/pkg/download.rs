@@ -41,8 +41,7 @@ use crate::{api_client::{self,
                     crypto::{artifact,
                              keys::parse_name_with_rev,
                              SigKeyPair},
-                    fs::{cache_artifact_path,
-                         cache_key_path},
+                    fs::cache_root_path,
                     package::{PackageArchive,
                               PackageIdent,
                               PackageTarget},
@@ -94,14 +93,10 @@ pub fn start<U>(ui: &mut U,
             download_path: {:?}, token: {:?}, verify: {}",
            url, channel, product, version, target, download_path, token, verify);
 
-    let key_download_path = &path_helper(download_path, "keys", &cache_key_path::<PathBuf>(None));
-    debug!("install key_download_path: {:?}", key_download_path);
-
-    let artifact_download_path = &path_helper(download_path,
-                                              "artifacts",
-                                              &cache_artifact_path::<PathBuf>(None));
-    debug!("install artifact_download_path: {:?}",
-           artifact_download_path);
+    let download_path_default = &cache_root_path::<PathBuf>(None); // Satisfy E0716
+    let download_path_expanded = download_path.unwrap_or(download_path_default).as_ref();
+    debug!("Using download_path {:?} expanded to {:?}",
+           download_path, download_path_expanded);
 
     // We deliberately use None to specifiy the default path as this is used for cert paths, which
     // we don't want to override.
@@ -112,9 +107,7 @@ pub fn start<U>(ui: &mut U,
                               api_client,
                               token,
                               channel,
-                              download_path,
-                              artifact_download_path,
-                              key_download_path,
+                              download_path: download_path_expanded,
                               verify };
 
     let download_count = task.execute(ui).unwrap();
@@ -133,8 +126,6 @@ struct DownloadTask<'a> {
     channel: &'a ChannelIdent,
     /// The path to the local artifact directory (e.g., /hab/cache/artifacts)
     download_path: &'a Path,
-    artifact_download_path: &'a Path,
-    key_download_path: &'a Path,
     verify: bool,
 }
 
@@ -296,7 +287,7 @@ impl<'a> DownloadTask<'a> {
         ui.status(Status::Downloading, format!("{} for {}", ident, target))?;
         match self.api_client.fetch_package((ident, target),
                                             self.token,
-                                            self.artifact_download_path,
+                                            &self.path_for_artifact(),
                                             ui.progress())
         {
             Ok(_) => Ok(()),
@@ -322,7 +313,7 @@ impl<'a> DownloadTask<'a> {
         self.api_client.fetch_origin_key(&name,
                                           &rev,
                                           token,
-                                          self.key_download_path,
+                                          &self.path_for_keys(),
                                           ui.progress())?;
         ui.status(Status::Cached,
                   format!("{} public origin key", &name_with_rev))?;
@@ -362,7 +353,7 @@ impl<'a> DownloadTask<'a> {
         // Once we have them, it's the natural time to verify.
         // Otherwise, it might make sense to take this fetch out of the verification code.
         let nwr = artifact::artifact_signer(&artifact.path)?;
-        if SigKeyPair::get_public_key_path(&nwr, self.key_download_path).is_err() {
+        if SigKeyPair::get_public_key_path(&nwr, &self.path_for_keys()).is_err() {
             ui.status(Status::Downloading,
                       format!("Public key for signer {:?}", nwr))?;
             self.fetch_origin_key(ui, &nwr, self.token)?;
@@ -370,7 +361,7 @@ impl<'a> DownloadTask<'a> {
 
         if self.verify {
             ui.status(Status::Verifying, artifact.ident()?)?;
-            artifact.verify(&self.key_download_path)?;
+            artifact.verify(&self.path_for_keys())?;
             debug!("Verified {} for {} signed by {}", ident, target, &nwr);
         }
         Ok(())
@@ -386,7 +377,7 @@ impl<'a> DownloadTask<'a> {
     /// the local package cache. It does not mean that the package is
     /// actually *in* the package cache, though.
     fn cached_artifact_path(&self, ident: &PackageIdent, target: PackageTarget) -> PathBuf {
-        self.artifact_download_path
+        self.path_for_artifact()
             .join(ident.archive_name_with_target(target).unwrap())
     }
 
@@ -400,10 +391,10 @@ impl<'a> DownloadTask<'a> {
                                  .show_package_metadata((&ident, target), channel, token)?;
         Ok(origin_package)
     }
-}
 
-/// The cache_*_path functions in fs don't let you override a path base with Some(base)
-/// This is a helper until we get that sorted out.
-fn path_helper(base: Option<&PathBuf>, extension: &str, default_path: &PathBuf) -> PathBuf {
-    base.map_or(default_path.to_path_buf(), |x| x.join(extension))
+    /// The cache_*_path functions in fs don't let you override a path base with Some(base)
+    /// So we have to build our own paths.
+    fn path_for_keys(&self) -> PathBuf { self.download_path.join("keys") }
+
+    fn path_for_artifact(&self) -> PathBuf { self.download_path.join("artifacts") }
 }
