@@ -1606,7 +1606,7 @@ fn install_sources_from_matches(matches: &ArgMatches<'_>) -> Result<Vec<InstallS
 fn download_idents_from_matches(matches: &ArgMatches<'_>) -> Result<Vec<PackageIdent>> {
     match matches.values_of("PKG_IDENT") {
         Some(ident_strings) => {
-            ident_strings.map(|t| PackageIdent::from_str(t).map_err(Error::from))
+            ident_strings.map(|t| ident_from_str_helper(t, None))
                          .collect()
         }
         _ => Ok(Vec::new()), // It's not an error to have no idents on command line
@@ -1642,23 +1642,20 @@ pub fn expand_line(line: &str, file: &str) -> Result<Option<PackageIdent>> {
     let trimmed = line.trim();
     match trimmed.len() {
         0 => Ok(None),
-        _ => {
-            PackageIdent::from_str(trimmed).map_err(|_| {
-                                               Error::ArgumentError(format!("{} in file {} is \
-                                                                             not a valid \
-                                                                             PackageIdent",
-                                                                            line, file))
-                                           })
-                                           .map(Some)
-        }
+        _ => ident_from_str_helper(trimmed, Some(file)).map(Some),
     }
 }
 
-fn ident_from_str_helper(s: &str, file: &str) -> Result<PackageIdent> {
+fn ident_from_str_helper(s: &str, file: Option<&str>) -> Result<PackageIdent> {
     PackageIdent::from_str(s).map_err(|_| {
-                                 Error::ArgumentError(format!("{} in file {} is not a valid \
-                                                               PackageIdent",
-                                                              s, file))
+                                 let msg = match file {
+                                     Some(filename) => {
+                                         format!("{} in file {} is not a valid PackageIdent",
+                                                 s, filename)
+                                     }
+                                     None => format!("{} is not a valid PackageIdent", s),
+                                 };
+                                 Error::ArgumentError(msg)
                              })
 }
 
